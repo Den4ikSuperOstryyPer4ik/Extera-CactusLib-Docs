@@ -37,13 +37,19 @@ temp_path = self.utils.FileSystem.write_temp_file("myfile.txt", content.encode("
 self.utils.FileSystem.delete_file_after(temp_path, 10)
 ```
 
+Методы для работы с файлами:
+- `write_temp_file(filename, content, mode="wb", delete_after=60)` - Создать файл в временной папке в кэше и записать в него содержимое, после чего удалить через заданное время(в секундах).
+- `delete_file_after(path, delay)` - Удалить файл после заданной задержки.
+- `get_file_content(path, mode="rb")` - Получить содержимое файла.
+- `get_temp_file_content(filename, mode="rb", delete_after=60)` - Получить содержимое временного файла.
+
 ### Экранирование текста (`escape_html`)
 
 Для безопасной вставки текста в сообщения с разметкой.
 
 ```python
 # Для HTML
-safe_html = self.utils.escape_html("<tag> & 'text'")
+safe_html_fragment = self.utils.escape_html("<tag> & 'text'")
 # результат: '&lt;tag&gt; &amp; 'text''
 ```
 
@@ -109,9 +115,7 @@ search_messages(
 
 ```python
 from typing import List, Any
-# Предполагается, что SearchFilter, MessageObject, TLRPC, 
-# get_account_instance, get_messages_controller, get_connections_manager, RequestCallback
-# уже импортированы или доступны.
+from org.telegram.messenger import MessageObject
 
 def my_search_callback(messages: List[MessageObject], error: Any):
     if error:
@@ -119,7 +123,7 @@ def my_search_callback(messages: List[MessageObject], error: Any):
     elif messages:
         self.info(f"Найдено {len(messages)} сообщений:")
         for msg in messages:
-            self.info(f"- Сообщение ID: {msg.id}")
+            self.info(f"- Сообщение ID: {msg.messageOwner.id}")
     else:
         self.warn("Сообщения не найдены.")
 
@@ -140,4 +144,5 @@ self.utils.Telegram.search_messages(
 )
 ```
 </details>
+
 

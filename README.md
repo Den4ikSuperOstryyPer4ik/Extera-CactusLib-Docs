@@ -47,10 +47,11 @@
 > Также обратите внимание, что метод `on_send_message_hook` переопределять больше не нужно. Для обработки команд используйте специальный декоратор, о котором рассказано далее.
 
 ## Содержание документации (будет пополняться)
-
   * [Создание команд (`commands.md`)](commands.md)
   * [Ответы на команды (`responding.md`)](responding.md)
   * [Локализация (Строки) (`strings.md`)](strings.md)
-  * [Форматирование текста (`formatting.md`)](formatting.md)
+  * [Форматирование текста (markdown/html) (`formatting.md`)](formatting.md)
   * [Обработка URI (`uri_handling.md`)](uri_handling.md)
+  * [Экспорт и импорт данных (`data.md`)](data.md)
+  * [Работа с TLRPC (`telegram_api.md`)](telegram_api.md)
   * [Вспомогательные утилиты (`utils.md`)](utils.md)
