@@ -56,7 +56,7 @@ from org.telegram.ui.Components import (BackupImageView,  # type: ignore
                                         LineProgressView)
 from ui.alert import AlertDialogBuilder
 from ui.bulletin import BulletinHelper
-from ui.settings import Divider, Header, Input
+from ui.settings import Divider, Header, Input, Switch
 
 import plugins_manager
 from hook_utils import find_class, get_private_field
@@ -1692,6 +1692,8 @@ class CactusLib(CactusUtils.CactusModule):
             "include_data_and_settings": "Include data and settings",
             "commands": "Commands:",
             "not_description": "Description not found",
+            "settings_show_cmds_description_label": "Show commands description",
+            "settings_show_cmds_description_subtext": "When installing a plugin and in the menu",
         },
         "ru": {
             "__doc__": "Библиотека Cactus с полноценным хелпом по командам и плагинам, безграничными возможностями для текстовых/uri команд, импорта/экспорта плагинов и многим другим!",
@@ -1762,6 +1764,8 @@ class CactusLib(CactusUtils.CactusModule):
             "include_data_and_settings": "Включая данные и настройки",
             "commands": "Команды:",
             "not_description": "Описание не найдено",
+            "settings_show_cmds_description_label": "Показывать описание команд",
+            "settings_show_cmds_description_subtext": "При установке плагина и в меню",
         }
     }
 
@@ -1885,6 +1889,13 @@ class CactusLib(CactusUtils.CactusModule):
                 icon="",
                 on_change=lambda lang: self._add_menu_items(lang),
                 subtext=self.string("settings_language_subtext")
+            ),
+            Switch(
+                key="show_cmds_description",
+                text=self.string("settings_show_cmds_description_label"),
+                default=True,
+                icon="msg_info",
+                subtext=self.string("settings_show_cmds_description_subtext")
             ),
             Divider(),
         ]
@@ -2885,7 +2896,7 @@ class ValidatePluginHandler(MethodHook):
             
             description = locale_dict.get("__doc__", description)
 
-            commands_with_docs = True
+            commands_with_docs = self.plugin.get_setting("show_cmds_description", True)
 
             description = description + "\n\n" + self.plugin.string("commands") + "\n" + (
                 (
@@ -2924,7 +2935,7 @@ class PluginActivityItemHandler(MethodHook):
             
             description = locale_dict.get("__doc__", bdescription)
 
-            commands_with_docs = True
+            commands_with_docs = self.plugin.get_setting("show_cmds_description", True)
 
             description = description + "\n\n" + self.plugin.string("commands") + "\n" + (
                 (
