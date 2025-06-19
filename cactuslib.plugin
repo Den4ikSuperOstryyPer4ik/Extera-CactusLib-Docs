@@ -10,6 +10,7 @@ import shlex
 import threading
 import time
 import traceback
+from uuid import uuid4
 import zlib
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -28,13 +29,13 @@ from android_utils import log as logcat
 from android_utils import run_on_ui_thread
 from base_plugin import (BasePlugin, HookResult, HookStrategy, MenuItemData,
                          MenuItemType, MethodHook)
-from client_utils import (RequestCallback, get_account_instance,
-                          get_connections_manager, get_last_fragment,
+from client_utils import (get_account_instance,
+                          get_last_fragment,
                           get_media_data_controller, get_messages_controller,
                           get_send_messages_helper, get_user_config,
                           run_on_queue, send_message, send_request)
 from com.exteragram.messenger.plugins import PluginsController  # type: ignore
-from com.exteragram.messenger.plugins.ui import PluginSettingsActivity  # type: ignore
+from com.exteragram.messenger.plugins.ui import PluginSettingsActivity, PluginsActivity  # type: ignore
 from java import dynamic_proxy, jarray, jfloat, jint, jlong  # type: ignore
 from java.io import (BufferedReader, File, InputStreamReader,  # type: ignore
                      IOException)
@@ -46,7 +47,7 @@ from org.telegram.messenger import (AndroidUtilities,  # type: ignore
                                     ApplicationLoader,
                                     LocaleController, MessageObject,
                                     SendMessagesHelper, Utilities)
-from org.telegram.tgnet import TLRPC  # type: ignore
+from org.telegram.tgnet import TLRPC, TLObject, RequestDelegate  # type: ignore
 from org.telegram.ui.ActionBar import BottomSheet  # type: ignore
 from org.telegram.ui.ActionBar import Theme  # type: ignore
 from org.telegram.ui.Cells import CheckBoxCell  # type: ignore
@@ -64,7 +65,7 @@ __name__ = "CactusLib"
 __description__ = "Cactus's library with full-fledged help, limitless features for text/uri commands, plugins import/export and more than!"
 __icon__ = "CactusPlugins/0"
 __id__ = "cactuslib"
-__version__ = "1.2.0"
+__version__ = "1.2.2"
 __author__ = "@CactusPlugins"
 __min_version__ = "11.12.0"
 __all__ = ("CactusUtils", "command", "uri", "HookResult", "HookStrategy", "MenuItemData", "MenuItemType")
@@ -1314,13 +1315,97 @@ class CactusUtils:
     PluginInfo = PluginInfo
 
     class Telegram:
+        class Result:
+            def __init__(self):
+                self.req_id: int = None
+                self.response: TLObject = None
+                self.error: TLRPC.TL_error = None
+
+                self._event = threading.Event()
+
+        class RequestCallback(dynamic_proxy(RequestDelegate)):
+            def __init__(self, fn: callable, *args, **kwargs) -> None: 
+                self._fn = fn
+                self._args = args
+                self._kwargs = kwargs
+            
+
+            def run(self, response: TLObject, error: TLRPC.TL_error):
+                self._fn(response, error, *self._args, **self._kwargs)
+        
+        class TLRPCException(Exception):
+            def __init__(self, req_id: int, error: TLRPC.TL_error):
+                super().__init__(f"[{req_id}] TLRPCError {error.code}: {error.text}")
+                self.error: TLRPC.TL_error = error
+                self.code: int = error.code
+                self.text: str = error.text
+                self.req_id: int = req_id
+
+        _res: Dict[int, Result] = {}
+
         @staticmethod
         def tlrpc_object(request_class, **kwargs):
             for k, v in kwargs.items():
                 setattr(request_class, k, v)
             
             return request_class
+        
+        @classmethod
+        def _callback(cls, result: Optional[TLObject], error: Optional[TLRPC.TL_error], uid: str):
+            try:
+                CactusUtils.debug(f"[TLRPC] {cls._res[uid].req_id}: {result} | {error}")
+                cls._res[uid].response = result
+                cls._res[uid].error = error
+                cls._res[uid]._event.set()
+            except:
+                CactusUtils.error(traceback.format_exc(), "test")
+
+        @classmethod
+        def send(
+            cls,
+            req,
+            callback: Optional[callable] = None, *,
+            wait_response: bool = True,
+            timeout: int = 7,
+            raise_errors: bool = True
+        ) -> Union[int, Result]:
+            uid = uuid4().hex
+            if wait_response:
+                cls._res[uid] = cls.Result()
+
+            req_id = send_request(
+                req, (
+                    cls.RequestCallback(cls._callback, uid)
+                    if wait_response
+                    else cls.RequestCallback(callback)
+                    if callback is not None
+                    else cls.RequestCallback(lambda *_: None)
+                )
+            )
+            CactusUtils.debug(f"Request with id {req_id} sent")
+
+            if not wait_response:
+                return req_id
             
+            cls._res[uid].req_id = req_id
+            
+            X = cls._res[uid]._event.wait(timeout)
+
+            if not X:
+                raise TimeoutError(f"Request with id {req_id} timed out")
+            
+            CactusUtils.debug(f"Request with id {req_id} received")
+            
+            result = cls._res.pop(uid)
+            if result.error and raise_errors:
+                CactusUtils.debug(f"Request with id {req_id} failed [{result.error.code}]: {result.error.text}")
+                raise cls.TLRPCException(result.req_id, result.error)
+            
+            return result
+
+        send_request = send
+
+
         class SearchFilter(Enum):
             GIF = 'gif'
             MUSIC = 'music'
@@ -1345,11 +1430,10 @@ class CactusUtils:
                 camel_case = re.sub(r'_([a-z])', lambda match: match.group(1).upper(), self.value)
                 camel_case = camel_case[0].upper() + camel_case[1:]
                 return getattr(TLRPC, f"TL_inputMessagesFilter" + camel_case)()
-    
+
         @classmethod
         def search_messages(
             cls,
-            callback: Callable[[List[MessageObject], Any], None],
             dialog_id: int,
             query: Optional[str] = None,
             from_id: Optional[int] = None,
@@ -1358,18 +1442,8 @@ class CactusUtils:
             reply_message_id: Optional[int] = None,
             top_message_id: Optional[int] = None,
             filter: SearchFilter = SearchFilter.EMPTY,
-        ):
-            def _convert_messages(result, error):
-                if error:
-                    callback(None, error)
-                    return
-                
-                messages = []
-                for i in range(result.messages.size()):
-                    messages.append(MessageObject(get_account_instance().getCurrentAccount(), result.messages.get(i), False, False))
-                
-                callback(messages, None)
-        
+            **kwargs
+        ) -> List[MessageObject]:
             req = cls.tlrpc_object(
                 TLRPC.TL_messages_search(),
                 peer=cls.input_peer(dialog_id),
@@ -1384,11 +1458,22 @@ class CactusUtils:
             if reply_message_id or top_message_id:
                 req.top_msg_id = reply_message_id or top_message_id
                 req.flags |= 2
-            return get_connections_manager().sendRequest(req, RequestCallback(_convert_messages))
-    
+
+            result = cls.send_request(req, **kwargs)
+            current_account = get_account_instance().getCurrentAccount()
+
+            return [
+                MessageObject(current_account, result.response.messages.get(i), False, False)
+                for i in range(result.response.messages.size())
+            ]
+
         @staticmethod
         def get_user(user_id: int):
             return get_messages_controller().getUser(user_id)
+        
+        @staticmethod
+        def input_user(user_id: int):
+            return get_messages_controller().getInputUser(user_id)
         
         @staticmethod
         def peer(peer_id: int):
@@ -1398,100 +1483,64 @@ class CactusUtils:
         def input_peer(peer_id: int):
             return get_messages_controller().getInputPeer(peer_id)
 
-        @staticmethod 
-        def get_channel(callback: Callable[[Any, Any], None], channel_id: int) -> int:
-            req = TLRPC.TL_channels_getChannels()
-            input_channel = get_messages_controller().getInputChannel(channel_id)
-            req.id.add(input_channel)
-            return send_request(req, RequestCallback(callback))
-            
-        @staticmethod
-        def get_chat(callback: Callable[[Any, Any], None], chat_id: int) -> int:
-            req = TLRPC.TL_messages_getChats()
-            input_chat = get_messages_controller().getInputChat(chat_id)
-            req.id.add(input_chat)
-            return send_request(req, RequestCallback(callback))
-            
         @classmethod
-        def create_input_location(cls, photo, size):
-            return cls.tlrpc_object(
-                TLRPC.TL_inputPhotoLocation(),
-                id=photo.id,
-                access_hash=photo.access_hash,
-                file_reference=photo.file_reference,
-                thumb_size=size.type,
-            )
-        
-        @classmethod
-        def create_peer_input_location(cls, chat, peer):
-            return cls.tlrpc_object(
-                TLRPC.TL_inputPeerPhotoFileLocation(),
-                big=True,
-                peer=cls.input_peer(peer),
-                photo_id=chat.photo.photo
-            )
-            
-        @classmethod
-        def get_chat_thumbnail(cls, callback: Callable[[Any, Any], None], chat, peer) -> int:
-            return send_request(
-                cls.tlrpc_object(
-                    TLRPC.TL_upload_getFile(),
-                    location=cls.create_peer_input_location(chat, peer),
-                    offset=0,
-                    limit=1024*1024
-                ),
-                RequestCallback(callback)
-            )
-        
-        @classmethod
-        def get_user_photos(cls, callback: Callable[[Any, Any], None], user_id: int, limit: int = 1) -> int:
-            return send_request(
-                cls.tlrpc_object(
-                    TLRPC.TL_photos_getUserPhotos(),
-                    user_id=cls.input_peer(user_id),
-                    limit=limit
-                ),
-                RequestCallback(callback)
-            )
-
-        @classmethod
-        def delete_messages(cls, messages: List[int], chat_id: int, topic_id: int = 0):
-            return get_messages_controller().deleteMessages(CactusUtils.array_list([jint(i) for i in messages]), None, None, chat_id, topic_id, True, 0)
-
-        @classmethod
-        def get_sticker_set_by_short_name(cls, callback: Callable[[Any, Any], None], short_name: str) -> int:
-            return send_request(
+        def get_sticker_set_by_short_name(cls, short_name: str, **kwargs):
+            return cls.send(
                 cls.tlrpc_object(
                     TLRPC.TL_messages_getStickerSet(),
                     stickerset=cls.tlrpc_object(
                         TLRPC.TL_inputStickerSetShortName(),
                         short_name=short_name
                     )
-                ),
-                RequestCallback(callback)
+                ), **kwargs
             )
+
+        @classmethod
+        def get_chat(cls, chat_id: int, **kwargs):
+            req = TLRPC.TL_messages_getChats()
+            req.id.add(chat_id)
+            return cls.send_request(req, **kwargs)
+        
+        @classmethod
+        def get_channel(cls, channel_id: int, **kwargs) -> int:
+            req = TLRPC.TL_channels_getChannels()
+            req.id.add(channel_id)
+            return cls.send_request(req, **kwargs)
+        
+        @classmethod
+        def get_user_photos(cls, user_id: int, limit: int = 1, **kwargs):
+            return cls.send_request(
+                cls.tlrpc_object(
+                    TLRPC.TL_photos_getUserPhotos(),
+                    user_id=cls.input_user(user_id),
+                    limit=limit
+                ),
+                **kwargs
+            )
+
+        @classmethod
+        def delete_messages(cls, messages: List[int], chat_id: int, topic_id: int = 0):
+            return get_messages_controller().deleteMessages(CactusUtils.array_list([jint(i) for i in messages]), None, None, chat_id, topic_id, True, 0)
+
 
     @classmethod
-    def get_message_by_rnd_in_current_chat(cls, rnd: str, fn: Callable[[MessageObject, Any], None]):
+    def get_message_by_rnd_in_current_chat(cls, rnd: str):
         fragment = get_last_fragment()
         if fragment.__class__.__name__ == "ChatActivity":
-            def _search_message_callback(response, error):
-                if error or not response:
-                    cls.error(error or "...")
-                    cls.show_error((error or "...")[:30])
-                    return
-                
-                fn(response[0], fragment)
-
-            cls.Telegram.search_messages(
-                callback=_search_message_callback,
-                dialog_id=get_private_field(fragment, "dialog_id"),
-                query=rnd,
-                limit=21,
-                top_message_id=get_private_field(fragment, "threadMessageId"),
-            )
+            try:
+                return cls.Telegram.search_messages(
+                    dialog_id=get_private_field(fragment, "dialog_id"),
+                    query=rnd,
+                    limit=21,
+                    top_message_id=get_private_field(fragment, "threadMessageId"),
+                )[0], fragment
+            except cls.Telegram.TLRPCException as e:
+                cls.error(e.text)
+                cls.show_error(e.text)
+                return None, None
         else:
-            cls.warn(f"[{rnd}] You are not in a chat!...")
+            cls.show_error(f"[{rnd}] You are not in a chat!...")
+            return None, None
     
     @contextmanager
     def SpinnerAlertDialog(self, text: Optional[str] = None):
@@ -1641,6 +1690,8 @@ class CactusLib(CactusUtils.CactusModule):
             "export_done": "Exported successfully!",
 
             "include_data_and_settings": "Include data and settings",
+            "commands": "Commands:",
+            "not_description": "Description not found",
         },
         "ru": {
             "__doc__": "Библиотека Cactus с полноценным хелпом по командам и плагинам, безграничными возможностями для текстовых/uri команд, импорта/экспорта плагинов и многим другим!",
@@ -1709,6 +1760,8 @@ class CactusLib(CactusUtils.CactusModule):
             "export_done": "Успешно!",
 
             "include_data_and_settings": "Включая данные и настройки",
+            "commands": "Команды:",
+            "not_description": "Описание не найдено",
         }
     }
 
@@ -1774,6 +1827,34 @@ class CactusLib(CactusUtils.CactusModule):
             ][0],
             DocumentHandler(self), 0
         )
+        self.hook_method(
+            [
+                i for i in (
+                    PluginsController
+                    .getClass()
+                    .getDeclaredMethods()
+                )
+                if repr(i) == (
+                    "<java.lang.reflect.Method 'public com.exteragram.messenger.plugins."
+                    "PluginsController$PluginValidationResult com.exteragram.messenger.plugins"
+                    ".PluginsController.validatePluginFromFile(java.lang.String)'>"
+                )
+            ][0], ValidatePluginHandler(self), 0
+        )
+        self.hook_method(
+            [
+                i for i in (
+                    PluginsActivity
+                    .getClass()
+                    .getDeclaredMethods()
+                )
+                if repr(i) == (
+                    "<java.lang.reflect.Method 'private org.telegram.ui.Components.UItem "
+                    "com.exteragram.messenger.plugins.ui.PluginsActivity.createPluginItem"
+                    "(com.exteragram.messenger.plugins.Plugin)'>"
+                )
+            ][0], PluginActivityItemHandler(self), 0
+        )
     
     def execute_on_uri_command(self, plugin_id: str, command: str, kwargs: Dict[str, Any]):
         plugin: List[CactusUtils.Plugin] = [p for p in plugins_manager.PluginsManager._plugins.values() if p.id == plugin_id]
@@ -1821,17 +1902,15 @@ class CactusLib(CactusUtils.CactusModule):
         if not id or not rnd:
             return
         
-        def _fn(msg, fragment):
-            if not msg:
-                return
-            
-            self_id = get_user_config().getClientUserId()
-            
-            if msg.messageOwner.from_id.user_id == self_id and self._enable_plugin(id):
-                text = self.help_query("" if isAllList == "true" else id, int(offset) )
-                self.utils.edit_message(msg, text, parse_mode="HTML", fragment=fragment)
+        msg, fragment = self.utils.get_message_by_rnd_in_current_chat(rnd)
+        if not msg:
+            return
         
-        self.utils.get_message_by_rnd_in_current_chat(rnd, _fn)
+        self_id = get_user_config().getClientUserId()
+        
+        if msg.messageOwner.from_id.user_id == self_id and self._enable_plugin(id):
+            text = self.help_query("" if isAllList == "true" else id, int(offset))
+            self.utils.edit_message(msg, text, parse_mode="HTML", fragment=fragment)
     
     def _enable_plugin(self, plugin_id: str) -> bool:
         plugin = ([
@@ -1873,20 +1952,18 @@ class CactusLib(CactusUtils.CactusModule):
         if not id or not rnd:
             return
 
-        def _fn(msg, fragment):
-            if not msg:
-                return
+        msg, fragment = self.utils.get_message_by_rnd_in_current_chat(rnd)
+        if not msg:
+            return
 
-            self_id = get_user_config().getClientUserId()
+        self_id = get_user_config().getClientUserId()
 
-            if msg.messageOwner.from_id.user_id == self_id:
-                with open(PluginsController.getInstance().getPluginPath(id), "rb") as f:
-                    path = self.utils.FileSystem.write_temp_file(f"{name}_{version or '-'}.plugin", f.read())
+        if msg.messageOwner.from_id.user_id == self_id:
+            with open(PluginsController.getInstance().getPluginPath(id), "rb") as f:
+                path = self.utils.FileSystem.write_temp_file(f"{name}_{version or '-'}.plugin", f.read())
 
-                self.answer_file(msg.messageOwner.dialog_id, path, None, editingMessageObject=msg)
-                self.utils.FileSystem.delete_file_after(path, 30)
-
-        self.utils.get_message_by_rnd_in_current_chat(rnd, _fn)
+            self.answer_file(msg.messageOwner.dialog_id, path, None, editingMessageObject=msg)
+            self.utils.FileSystem.delete_file_after(path, 30)
 
     def help_query(self, query: Optional[str] = None, offset: int = 0, limit: int = 20):
         try:
@@ -2024,16 +2101,14 @@ class CactusLib(CactusUtils.CactusModule):
     def uri_open_plugin_help(self, id: str, rnd: str, offset: int = 0):
         if id is None or not rnd:
             return
-        
-        def _fn(msg, fragment):
-            if not msg:
-                return
-            
-            if msg.messageOwner.from_id.user_id == get_user_config().getClientUserId():
-                text = self.help_query(id, int(offset))
-                self.utils.edit_message(msg, text, parse_mode="HTML", fragment=fragment)
 
-        self.utils.get_message_by_rnd_in_current_chat(rnd, _fn)
+        msg, fragment = self.utils.get_message_by_rnd_in_current_chat(rnd)
+        if not msg:
+            return
+        
+        if msg.messageOwner.from_id.user_id == get_user_config().getClientUserId():
+            text = self.help_query(id, int(offset))
+            self.utils.edit_message(msg, text, parse_mode="HTML", fragment=fragment)
 
     @command(doc="help_cmd")
     def chelp(self, command: CactusUtils.Command):
@@ -2314,34 +2389,32 @@ class CactusLib(CactusUtils.CactusModule):
         if not rnd:
             return
         
-        def _fn(msg, fragment):
-            if not msg:
+        msg, fragment = self.utils.get_message_by_rnd_in_current_chat(rnd)
+        if not msg:
+            return
+        
+        self_id = get_user_config().getClientUserId()
+        
+        if msg.messageOwner.from_id.user_id == self_id:
+            result = self._export_plugins_action(action, id, pl)
+            if not result:
                 return
             
-            self_id = get_user_config().getClientUserId()
-            
-            if msg.messageOwner.from_id.user_id == self_id:
-                result = self._export_plugins_action(action, id, pl)
-                if not result:
+            if action != "export":
+                self.utils.edit_message(msg, result, parse_mode="HTML", fragment=fragment)
+            else:
+                chat_id = None
+                peer = msg.messageOwner.peer_id
+                if isinstance(peer, TLRPC.TL_peerUser):
+                    chat_id = peer.user_id
+                elif isinstance(peer, TLRPC.TL_peerChat):
+                    chat_id = -peer.chat_id
+                elif isinstance(peer, TLRPC.TL_peerChannel):
+                    chat_id = -peer.channel_id
+                else:
                     return
                 
-                if action != "export":
-                    self.utils.edit_message(msg, result, parse_mode="HTML", fragment=fragment)
-                else:
-                    chat_id = None
-                    peer = msg.messageOwner.peer_id
-                    if isinstance(peer, TLRPC.TL_peerUser):
-                        chat_id = peer.user_id
-                    elif isinstance(peer, TLRPC.TL_peerChat):
-                        chat_id = -peer.chat_id
-                    elif isinstance(peer, TLRPC.TL_peerChannel):
-                        chat_id = -peer.channel_id
-                    else:
-                        return
-                    
-                    self.answer_file(chat_id, result, "EXPORT", parse_mode="HTML", editingMessageObject=msg) # EXPORT
-        
-        self.utils.get_message_by_rnd_in_current_chat(rnd, _fn)
+                self.answer_file(chat_id, result, "EXPORT", parse_mode="HTML", editingMessageObject=msg) # EXPORT
 
     def _open_export_plugins_alert(self, ctx):
         CactusIEAlert(self, ctx.get("context"), isExport=True, ctx=ctx).show_alert()
@@ -2742,7 +2815,6 @@ class CactusIEAlert:
             self.lib.error(traceback.format_exc())
 
 
-
 class UriHandler(MethodHook):
     def __init__(self, plugin: CactusLib):
         self.plugin = plugin
@@ -2789,3 +2861,153 @@ class DocumentHandler(MethodHook):
         except:
             self.lib.error(traceback.format_exc())
 
+
+class ValidatePluginHandler(MethodHook):
+    def __init__(self, plugin):
+        self.plugin = plugin
+    
+
+    def after_hooked_method(self, param):
+        try:
+            res = param.getResult()
+            if res.error:
+                return
+            
+            p = res.plugin
+
+            strings, commands, description = get_plugin_strings_and_commands(param.args[0])
+            if not strings:
+                return
+            
+            locale_dict: Dict[str, str] = strings.get(CactusUtils.get_locale(), strings)
+            if "en" in locale_dict:
+                locale_dict = locale_dict["en"]
+            
+            description = locale_dict.get("__doc__", description)
+
+            commands_with_docs = True
+
+            description = description + "\n\n" + self.plugin.string("commands") + "\n" + (
+                (
+                    " • ".join(list(commands.keys()))
+                ) if not commands_with_docs else (
+                    "\n".join(
+                        [
+                            (f"• {cmd} " + locale_dict.get(doc_key, strings.get("en", strings).get(doc_key, "")))
+                            if doc_key else f"• {cmd} - " + self.plugin.string("not_description")
+                            for cmd, doc_key in commands.items()
+                        ]
+                    )
+                )
+            )
+            p.setDescription(description)
+        except:
+            self.plugin.error(traceback.format_exc())
+        
+
+class PluginActivityItemHandler(MethodHook):
+    def __init__(self, plugin):
+        self.plugin = plugin
+    
+
+    def before_hooked_method(self, param):
+        try:
+            p = param.args[0]
+
+            strings, commands, bdescription = get_plugin_strings_and_commands(PluginsController.getInstance().getPluginPath(p.getId()))
+            if not strings:
+                return
+            
+            locale_dict: Dict[str, str] = strings.get(CactusUtils.get_locale(), strings)
+            if "en" in locale_dict:
+                locale_dict = locale_dict["en"]
+            
+            description = locale_dict.get("__doc__", bdescription)
+
+            commands_with_docs = True
+
+            description = description + "\n\n" + self.plugin.string("commands") + "\n" + (
+                (
+                    " • ".join(list(commands.keys()))
+                ) if not commands_with_docs else (
+                    "\n".join(
+                        [
+                            (f"• {cmd} " + locale_dict.get(doc_key, strings.get("en", strings).get(doc_key, "")))
+                            if doc_key else f"• {cmd} - " + self.plugin.string("not_description")
+                            for cmd, doc_key in commands.items()
+                        ]
+                    )
+                )
+            )
+            p.setDescription(description)
+        except:
+            self.plugin.error(traceback.format_exc())
+
+
+def get_plugin_strings_and_commands(filepath: str) -> Tuple[Dict[str, Dict[str, str]], Dict[str, str], Optional[str]]:
+    with open(filepath, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=filepath)
+    
+    description, strings, commands = "", {}, {}
+    
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "__description__":
+                    if isinstance(node.value, ast.Constant):
+                        description = node.value.value
+                        break
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            inherits_from_plugin = False
+            for base in node.bases:
+                if (isinstance(base, ast.Attribute) and
+                    isinstance(base.value, ast.Name) and
+                    base.value.id == "CactusUtils" and
+                    base.attr in ["Plugin", "CactusPlugin", "CactusModule"]):
+                    inherits_from_plugin = True
+                    break
+
+            if inherits_from_plugin:
+                for item in node.body:
+                    if isinstance(item, ast.Assign):
+                        for target in item.targets:
+                            if isinstance(target, ast.Name) and target.id == "strings":
+                                strings = ast.literal_eval(item.value)
+                                break
+
+                    elif isinstance(item, ast.FunctionDef):
+                        for decorator in item.decorator_list:
+                            is_command_decorator = False
+                            decorator_args = {}
+
+                            if isinstance(decorator, ast.Call):
+                                if (isinstance(decorator.func, ast.Name) and decorator.func.id == "command") or \
+                                   (isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "command"):
+                                    is_command_decorator = True
+                                    for keyword in decorator.keywords:
+                                        if keyword.arg == "command":
+                                            decorator_args['cmd'] = ast.literal_eval(keyword.value)
+                                        elif keyword.arg == "doc":
+                                            decorator_args['doc'] = ast.literal_eval(keyword.value)
+                                    if decorator.args and len(decorator.args) > 0 and 'cmd' not in decorator_args:
+                                        decorator_args['cmd'] = ast.literal_eval(decorator.args[0])
+
+                            elif isinstance(decorator, ast.Name) and decorator.id == "command":
+                                is_command_decorator = True
+                                decorator_args['cmd'] = item.name
+                                decorator_args['doc'] = None
+
+
+                            if is_command_decorator:
+                                cmd_value = decorator_args.get('cmd', item.name)
+                                doc_value = decorator_args.get('doc')
+
+                                commands[cmd_value] = doc_value
+                                break
+
+                if strings is not None:
+                    return strings, commands, description
+    
+    return strings, commands, description

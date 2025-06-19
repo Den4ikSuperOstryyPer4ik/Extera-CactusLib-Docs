@@ -1,0 +1,162 @@
+import ast
+import base64
+import html
+import inspect
+import json
+import os.path
+import random
+import re
+import shlex
+import threading
+import time
+import traceback
+from uuid import uuid4
+import zlib
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from enum import Enum
+from html.parser import HTMLParser
+from struct import unpack
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from urllib.parse import parse_qs, urlencode, urlparse
+
+from android.util import TypedValue  # type: ignore
+from android.view import Gravity, View  # type: ignore
+from android.widget import LinearLayout  # type: ignore
+from android.widget import FrameLayout, TextView  # type: ignore
+from android_utils import OnClickListener
+from android_utils import log as logcat
+from android_utils import run_on_ui_thread
+from base_plugin import (BasePlugin, HookResult, HookStrategy, MenuItemData,
+                         MenuItemType, MethodHook)
+from client_utils import (RequestCallback, get_account_instance,
+                          get_connections_manager, get_last_fragment,
+                          get_media_data_controller, get_messages_controller,
+                          get_send_messages_helper, get_user_config,
+                          run_on_queue, send_message, send_request)
+from com.exteragram.messenger.plugins import PluginsController  # type: ignore
+from com.exteragram.messenger.plugins.ui import PluginSettingsActivity, PluginsActivity  # type: ignore
+from java import dynamic_proxy, jarray, jfloat, jint, jlong  # type: ignore
+from java.io import (BufferedReader, File, InputStreamReader,  # type: ignore
+                     IOException)
+from java.lang import (Double, Integer, InterruptedException, Runtime,  # type: ignore
+                       String)
+from java.lang import System as JavaSystem  # type: ignore
+from java.util import ArrayList, Locale  # type: ignore
+from org.telegram.messenger import (AndroidUtilities,  # type: ignore
+                                    ApplicationLoader,
+                                    LocaleController, MessageObject,
+                                    SendMessagesHelper, Utilities)
+from org.telegram.tgnet import TLRPC, TLObject, RequestDelegate  # type: ignore
+from org.telegram.ui.ActionBar import BottomSheet, SimpleTextView  # type: ignore
+from org.telegram.ui.ActionBar import Theme  # type: ignore
+from org.telegram.ui.Cells import CheckBoxCell  # type: ignore
+from org.telegram.ui.Components import (BackupImageView,  # type: ignore
+                                        CheckBox2, LayoutHelper,
+                                        LineProgressView, RadialProgress2)
+
+from org.telegram.ui import LaunchActivity  # type: ignore
+
+from ui.alert import AlertDialogBuilder
+from ui.bulletin import BulletinHelper
+from ui.settings import Divider, Header, Input
+
+import plugins_manager
+from hook_utils import find_class, get_private_field
+
+__name__ = "UpdateUI"
+__description__ = "Test en description"
+__icon__ = "CactusPlugins/4"
+__id__ = "uiupdate"
+__version__ = "1.0.8"
+__author__ = "@CactusPlugins"
+__min_version__ = "11.12.0"
+
+
+try:
+    from cactuslib import CactusUtils, command, uri, HookResult, HookStrategy
+except (ImportError, ModuleNotFoundError):
+    raise Exception("Необходим CactusLib. Пожалуйста, установите его.")
+
+
+class UpdatePluginsAlert(CactusUtils.Plugin):
+    strings = {
+        "en": {
+            "commands": "Commands:",
+            "not_description": "Description not found",
+            "test1_doc": "- first command with BLA",
+            "test2_doc": "- second command with BLU",
+            "test3_doc": "- third command with BLABLU",
+        },
+        "ru": {
+            "__doc__": "Тестовое ру описание",
+            "commands": "Команды:",
+            "not_description": "Описание не найдено",
+            "test1_doc": "- первая команда с БЛАБЛА",
+            "test2_doc": "- вторая команда с БЛЮБЛЮ",
+            "test3_doc": "- третья команда с БЛАБЛЮ",
+        }
+    }
+
+    @command("test1", doc="test1_doc")
+    def test1(self, command):
+        ...
+
+    @command(doc="test2_doc")
+    def test2(self, command):
+        ...
+    
+    @command()
+    def test33(self, command):
+        ...
+
+    
+    def on_plugin_load(self):
+        super().on_plugin_load()
+
+        # activity = LaunchActivity.instance
+        # get_private_field(activity, "frameLayout").addView(self.get_update_button_view(activity), LayoutHelper.createFrame(78, 78, Gravity.BOTTOM, 0, 28, 0, 0))
+        # self.hook_method(ApplicationLoader.applicationLoaderInstance.takeUpdateButton, )
+
+        
+    
+
+    def get_update_button_view(self, activity):
+        button = FrameLayout(activity)
+    
+        updateLayoutIcon = RadialProgress2(button)
+        # updateLayoutIcon.setColors(jlong(4294967295), jlong(4294967295), jlong(4294967295), jlong(4294967295))
+        updateLayoutIcon.setProgressRect(AndroidUtilities.dp(22), AndroidUtilities.dp(11), AndroidUtilities.dp(22 + 22), AndroidUtilities.dp(11 + 22))
+        updateLayoutIcon.setCircleRadius(AndroidUtilities.dp(11))
+        updateLayoutIcon.setAsMini()
+
+        
+        updateTextViews = {}
+        for i in range(2):
+            updateTextViews[i] = SimpleTextView(activity)
+            updateTextViews[i].setTextSize(15)
+            updateTextViews[i].setTypeface(AndroidUtilities.bold())
+            # updateTextViews[i].setTextColor(jlong(4294967295))
+            updateTextViews[i].setGravity(Gravity.LEFT)
+            button.addView(updateTextViews[i], LayoutHelper.createFrame(-1, -2, Gravity.CENTER_VERTICAL, 74, 0, 0, 0))
+        
+        updateTextViews[0].setText("Update plugins (1)")
+        updateTextViews[1].setAlpha(0)
+        updateTextViews[1].setVisibility(View.GONE)
+
+        updateSizeTextView = TextView(activity)
+        updateSizeTextView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15)
+        updateSizeTextView.setTypeface(AndroidUtilities.bold())
+        updateSizeTextView.setGravity(Gravity.RIGHT)
+        # updateSizeTextView.setTextColor(jlong(4294967295))
+        button.addView(updateSizeTextView, LayoutHelper.createFrame(-2, -2, Gravity.CENTER_VERTICAL | Gravity.RIGHT, 0, 0, 17, 0))
+        
+        button.setOnClickListener(OnClickListener(self.on_click_update_button))
+        
+        return button
+    
+    def on_click_update_button(self):
+        self.utils.show_info("Update...")
+    
+
+

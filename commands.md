@@ -47,14 +47,14 @@ class Command:
     ```
 
 2.  **Команда с аргументами и документацией:**
-    Эта команда будет называться `logs` (т.к. имя не указано в декораторе) и будет доступна по префиксу (например, `.logs`). Её описание будет браться из `strings` по ключу `cmd_logs_doc`.
+    Эта команда будет называться `logs` (т.к. имя не указано в декораторе) и будет доступна по префиксу (например, `.logs`). Её описание будет браться из `strings` по ключу `cmd_logs_doc` в локали системы.
 
     ```python
     @command(doc="cmd_logs_doc")
     def logs(self, command: CactusUtils.Command):
         # command.args содержит список аргументов
         if not command.args:
-            text = "Пожалуйста, укажите аргументы."
+            text = self.string("no_args")
         else:
             text = self._get_logs_from_somewhere(command.args)
 
@@ -66,7 +66,7 @@ class Command:
     ```
 
 3.  **Команда, зависимая от настройки:**
-    Эта команда будет работать только если в настройках плагина опция `test_command` включена.
+    Эта команда будет работать только если в настройках плагина опция `test_command` включена. (Она должна являться `Switch`'ем)
 
     ```python
     @command(enabled="test_command")

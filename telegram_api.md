@@ -1,28 +1,82 @@
 # CactusPlugin: Взаимодействие с Telegram API (TLRPC)
 
-Для продвинутых сценариев, выходящих за рамки простого ответа на команды, CactusLib предоставляет класс-помощник `CactusUtils.Telegram`. Он значительно упрощает прямое взаимодействие с методами Telegram API (TLRPC) и доступ к данным из кэша приложения.
+Для продвинутых сценариев CactusLib предоставляет класс-помощник `CactusUtils.Telegram`. Он значительно упрощает прямое взаимодействие с методами Telegram API (TLRPC), предлагая **синхронный** способ выполнения запросов, более привычный для разработчиков и готовые методы-обертки для популярных запросов.
 
-Класс доступен через `self.utils.Telegram`. Его методы можно разделить на две категории:
+Вместо использования callback-функций, теперь вы можете отправлять запросы и получать результат напрямую, обрабатывая ошибки через стандартный механизм `try...except` или самостоятельно без этого.
 
-1.  **Синхронные методы**: Быстро возвращают данные напрямую.
-2.  **Асинхронные запросы**: Отправляют запрос в сеть и требуют `callback`-функцию для обработки ответа.
+Класс доступен через `self.utils.Telegram`.
 
-## Callback-функция
-Асинхронные методы не возвращают результат сразу. Вместо этого они принимают функцию обратного вызова (callback), которая будет исполнена после получения ответа от серверов Telegram.
+## Основной метод: `send` (aka `send_request`)
 
-Эта функция всегда принимает два аргумента: `response` и `error`.
+Это центральный метод для выполнения всех API-запросов. Большинство других методов в этом классе являются лишь удобными обертками над ним.
+
+**Сигнатура:**
+```python
+def send(req, *, wait_response: bool = True, timeout: int = 7, raise_errors: bool = True) -> Union[int, Result]: ...
+```
+-   `req`: Полностью сформированный объект запроса `TLRPC`.
+-   `wait_response` (`bool`): Если `True` (по умолчанию), метод будет ожидать ответа от Telegram и вернет результат. Если `False`, метод не будет ждать и сразу вернет ID запроса.
+-   `timeout` (`int`): Максимальное время ожидания ответа в секундах.
+-   `raise_errors` (`bool`): Если `True` (по умолчанию), в случае ошибки от API будет выброшено исключение `TLRPCException`. Если `False`, метод вернет объект `Result` с заполненным полем `.error`.
+-   `callback` (`Optional[Callable[[Any, Any], None]`): Если указана и `wait_response=False`, метод вызовет переданную функцию с результатом запроса и ошибкой (если есть) в качестве аргументов.
+```python
+class Result:
+    req_id: int
+    error: Optional[TLRPC.TL_error]
+    response: Optional[TLObject]
+```
+
+### Синхронный запрос (стандартное поведение)
+
+Это основной способ использования. Выполнение кода приостанавливается до получения ответа или истечения таймаута.
 
 ```python
-def my_callback(response, error):
-    # Если error не None, произошла ошибка
-    if error:
-        self.error(f"Произошла ошибка в API: {error.text}")
-        self.utils.show_error(f"Ошибка: {error.text}")
-        return
+# Создаем запрос для получения информации о чате по его ID
+req = TLRPC.TL_messages_getChats()
+req.id.add(-123456789)
 
-    # Если ошибки нет, обрабатываем успешный ответ
-    # response содержит объект, который прислал Telegram
-    self.info(f"Получен успешный ответ: {response}")
+try:
+    # Отправляем запрос и ждем результат
+    result = self.utils.Telegram.send(req)
+    
+    # result - это объект Result, содержащий ответ
+    chat.title = result.response.chats.get(0)
+    self.utils.show_info(f"Чат: {chat.title}")
+
+except self.utils.Telegram.TLRPCException as e:
+    # Перехватываем ошибки, если API вернул ошибку
+    self.error(f"Ошибка API {e.error.code}: {e.error.text}")
+
+except TimeoutError:
+    # Перехватываем ошибку, если сервер не ответил вовремя
+    self.error("Сервер не ответил на запрос.")
+```
+
+### Запрос "Fire-and-Forget" (без ожидания ответа)
+
+Используйте `wait_response=False`, если вам не важен результат запроса, и вы не хотите блокировать выполнение кода.
+
+```python
+# Пример: отправка статуса оффлайн
+req = self.utils.Telegram.tlrpc_object(
+    TL_account.updateStatus(),
+    offline=True
+)
+
+# Отправляем запрос и не ждем ответа
+self.utils.Telegram.send(req, wait_response=False)
+```
+### Использование callback (как обычно)
+Если вы предпочитаете использовать callback-функции, вы можете передать их в метод `send` как аргумент `callback`.
+```python
+def on_chat_info(response, error):
+    if error: return
+    # response в данном случае - это объект TLRPC.messages_Chats
+    chat_title = response.chats.get(0).title
+    self.utils.show_info(f"Имя чата: {chat_title}")
+
+# Отправляем запрос и передаем callback-функцию
+self.utils.Telegram.send(req, wait_response=False, callback=on_chat_info)
 ```
 
 ## Вспомогательные методы
@@ -45,25 +99,76 @@ req = self.utils.Telegram.tlrpc_object(
     limit=5
 )
 ```
-## Синхронные методы
+## Готовые методы-обертки
 
-Эти методы получают уже известные приложению данные и возвращают результат быстро.
+Эти методы упрощают вызов популярных эндпоинтов API. Они используют `send` "под капотом", поэтому вы можете передавать в них его аргументы (`timeout`, `raise_errors` и т.д.).
 
-### `get_user(user_id)`
-Возвращает объект пользователя `TLRPC.User` из кэша.
+### `search_messages(...)`
+
+Выполняет поиск сообщений в диалоге по множеству критериев.
+
+-   `dialog_id` (`int`): ID диалога для поиска.
+-   `query` (`str`): Текстовый запрос.
+-   `from_id` (`int`): ID отправителя.
+-   `filter` (`SearchFilter`): Фильтр типа сообщений (см. ниже).
+-   `limit` (`int`): Количество сообщений для возврата.
+-   `offset` (`int`): Смещение для начала поиска.
+
+
+Возвращает список объектов `org.telegram.messenger.MessageObject`.
+
+**`SearchFilter`** - это `Enum` для удобного выбора фильтра.
+Примеры значений: `SearchFilter.PHOTO_VIDEO`, `SearchFilter.URL`, `SearchFilter.MUSIC`, `SearchFilter.EMPTY` и другие.
 
 ```python
-user = self.utils.Telegram.get_user(12345678)
-if user:
-    self.info(f"Имя пользователя: {user.first_name}")
+try:
+    # Ищем последние 5 сообщений с URL в текущем чате
+    found_messages = self.utils.Telegram.search_messages(
+        dialog_id=command.params.peer,
+        filter=self.utils.Telegram.SearchFilter.URL,
+        limit=5
+    )
+    self.answer(command.params, f"Найдено ссылок: {len(found_messages)}")
+except self.utils.Telegram.TLRPCException as e:
+    self.answer(command.params, f"Ошибка поиска: {e.error.text}")
 ```
 
-### `peer(peer_id)` и `input_peer(peer_id)`
-Получают объекты `Peer` и `InputPeer` соответственно. `InputPeer` необходим для большинства API-запросов, где нужно указать пользователя, чат или канал.
+### `get_chat(...)` и `get_channel(...)`
+Получают полную информацию о чате или канале.
 
 ```python
-# Получаем InputPeer для отправки запроса
-user_input_peer = self.utils.Telegram.input_peer(12345678)
+try:
+    result = self.utils.Telegram.get_chat(-10012345678)
+    chat_title = result.response.chats.get(0).title
+    self.utils.show_info(f"Информация о чате: {chat_title}")
+except self.utils.Telegram.TLRPCException as e:
+    self.error(f"Не удалось получить информацию о чате: {e.error.text}")
+
+```
+
+### `get_user_photos(...)`
+Получает фотографии профиля пользователя.
+
+```python
+try:
+    result = self.utils.Telegram.get_user_photos(user_id, limit=3)
+    photo_count = len(result.response.photos)
+    self.utils.show_info(f"Найдено {photo_count} фото.")
+except self.utils.Telegram.TLRPCException as e:
+    self.error(f"Не удалось получить фото: {e.error.text}")
+```
+
+### `get_sticker_set_by_short_name(...)`
+Получает информацию о наборе стикеров по его короткому имени.
+Короткое имя - это часть URL стикерпака, например, `CactusPlugins` в `t.me/addstickers/CactusPlugins`.
+
+```python
+try:
+    result = self.utils.Telegram.get_sticker_set_by_short_name("CactusPlugins")
+    sticker_set = result.response.set
+    self.utils.show_info(f"Найден стикерпак: {sticker_set.title}")
+except self.utils.Telegram.TLRPCException as e:
+    self.error(f"Стикерпак не найден: {e.error.text}")
 ```
 
 ### `delete_messages(messages, chat_id, ...)`
@@ -78,44 +183,11 @@ messages_to_delete = [101, 102]
 self.utils.Telegram.delete_messages(messages_to_delete, command.params.peer)
 ```
 
-## Асинхронные запросы
+## Доступ к кэшу
 
-### `get_chat(callback, chat_id)` и `get_channel(callback, channel_id)`
-Получают полную информацию о чате или канале соответственно.
+Эти методы получают данные из локального кэша приложения и работают мгновенно.
 
-```python
-def on_chat_info(response, error):
-    if error: return
-    # response.chats.get(0) будет содержать объект чата
-    chat_title = response.chats.get(0).title
-    self.utils.show_info(f"Полное инфо о чате: {chat_title}")
-
-# ID чата всегда пишется с минусом вначале, но без 100, как в Bot API.
-self.utils.Telegram.get_chat(on_chat_info, -1234567890)
-```
-
-### `get_user_photos(callback, user_id, limit)`
-Получает фотографии профиля пользователя.
-
-```python
-def on_user_photos(response, error):
-    if error: return
-    # response - это объект photos.Photos
-    photo_count = len(response.photos)
-    self.utils.show_info(f"Найдено {photo_count} фото профиля.")
-
-self.utils.Telegram.get_user_photos(on_user_photos, 12345678, limit=5)
-```
-
-### `get_sticker_set_by_short_name(callback, short_name)`
-Получает информацию о наборе стикеров по его короткому имени (например, "Animals").
-
-```python
-def on_sticker_set(response, error):
-    if error: return
-    # response - это messages.StickerSet
-    self.utils.show_info(f"Стикерпак '{response.set.title}' содержит {len(response.documents)} стикеров.")
-
-self.utils.Telegram.get_sticker_set_by_short_name(on_sticker_set, "Animals")
-```
-
+-   `get_user(user_id)`: Возвращает объект `TLRPC.User`.
+-   `input_user(user_id)`: Возвращает `TLRPC.InputUser` для использования в запросах.
+-   `peer(peer_id)`: Возвращает `TLRPC.Peer`.
+-   `input_peer(peer_id)`: Возвращает `TLRPC.InputPeer` для использования в запросах.
